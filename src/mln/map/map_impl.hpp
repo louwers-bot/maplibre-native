@@ -61,7 +61,7 @@ public:
     void onInvalidate() final;
     void onResourceError(std::exception_ptr) final;
     void onWillStartRenderingFrame() final;
-    void onDidFinishRenderingFrame(RenderMode, bool, bool, const gfx::RenderingStats&) final;
+    void onDidFinishRenderingFrame(RenderMode, bool, bool, std::shared_ptr<gfx::RenderingStats>) final;
     void onWillStartRenderingMap() final;
     void onDidFinishRenderingMap() final;
     void onTerrainCenterElevationChanged(double elevationMeters) final;
@@ -95,9 +95,11 @@ public:
     const float pixelRatio;
     const bool crossSourceCollisions;
     const bool fastPFOREnabled;
+    const bool captureRenderedFeatures;
 
     MapDebugOptions debugOptions{MapDebugOptions::NoDebug};
     std::unique_ptr<gfx::RenderingStatsView> renderingStatsView;
+    std::shared_ptr<gfx::RenderingStats> lastFrameStats;
 
     std::shared_ptr<FileSource> fileSource;
 
@@ -144,6 +146,12 @@ public:
     /// Runs a return still waiting before the app sets a camera, which every camera entry point
     /// does first, so that the return does not move the app's camera afterwards.
     void settleCenterAwaitingSeaLevel();
+    /// A height report arrived while a camera transition was running; the clamp applies it
+    /// once the transition ends instead of cutting the transition short.
+    bool centerAwaitingTerrainAnchor = false;
+    /// Moves the centre altitude to `elevationMeters` keeping lng/lat; false when the change
+    /// is under the sub-metre threshold.
+    bool clampCenterToTerrain(double elevationMeters);
     bool debugAboveGroundLog = false;
 };
 

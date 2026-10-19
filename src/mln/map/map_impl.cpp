@@ -59,6 +59,7 @@ Map::Impl::Impl(RendererFrontend& frontend_,
       pixelRatio(mapOptions.pixelRatio()),
       crossSourceCollisions(mapOptions.crossSourceCollisions()),
       fastPFOREnabled(mapOptions.fastPFOREnabled()),
+      captureRenderedFeatures(mapOptions.renderedFeatureInfo()),
       fileSource(std::move(fileSource_)),
       style(std::make_unique<style::Style>(fileSource, pixelRatio, frontend_.getThreadPool())),
       annotationManager(*style) {
@@ -130,6 +131,16 @@ void Map::Impl::onUpdate() {
         returnCenterToSeaLevel();
     }
 
+    // The clamp stood aside for a transition (onTerrainCenterElevationChanged); now that it
+    // is over, put the centre on the ground it arrived over. The reported height outlives a
+    // terrain removed during the transition, so only apply it while there is still terrain.
+    if (centerAwaitingTerrainAnchor && !transform.inTransition()) {
+        centerAwaitingTerrainAnchor = false;
+        if (centerClampedToGround && style->impl->getTerrain() && !std::isnan(terrainCenterElevation)) {
+            clampCenterToTerrain(terrainCenterElevation);
+        }
+    }
+
     std::optional<Immutable<style::Terrain::Impl>> terrainImpl;
     if (auto* terrain = style->impl->getTerrain()) {
         terrainImpl = terrain->impl;
@@ -150,12 +161,14 @@ void Map::Impl::onUpdate() {
                                .images = style->impl->getImageImpls(),
                                .sources = style->impl->getSourceImpls(),
                                .layers = style->impl->getLayerImpls(),
+                               .globalState = style->impl->getGlobalStateShared(),
                                .annotationManager = annotationManager.makeWeakPtr(),
                                .fileSource = fileSource,
                                .prefetchZoomDelta = prefetchZoomDelta,
                                .stillImageRequest = bool(stillImageRequest),
                                .crossSourceCollisions = crossSourceCollisions,
                                .fastPFOREnabled = fastPFOREnabled,
+                               .captureRenderedFeatures = captureRenderedFeatures,
                                .tileLodMinRadius = tileLodMinRadius,
                                .tileLodScale = tileLodScale,
                                .tileLodPitchThreshold = tileLodPitchThreshold,
@@ -274,11 +287,11 @@ void Map::Impl::onWillStartRenderingFrame() {
 void Map::Impl::onDidFinishRenderingFrame(RenderMode renderMode,
                                           bool needsRepaint,
                                           bool placemenChanged,
-                                          const gfx::RenderingStats& stats) {
+                                          std::shared_ptr<gfx::RenderingStats> stats) {
     rendererFullyLoaded = renderMode == RenderMode::Full;
 
     if (renderingStatsView && style) {
-        renderingStatsView->update(*style, stats);
+        renderingStatsView->update(*style, *stats);
     }
 
     if (mode == MapMode::Continuous) {
@@ -305,6 +318,8 @@ void Map::Impl::onDidFinishRenderingFrame(RenderMode renderMode,
         const auto request = std::move(stillImageRequest);
         request->callback(nullptr);
     }
+
+    lastFrameStats = std::move(stats);
 }
 
 void Map::Impl::onWillStartRenderingMap() {
@@ -434,16 +449,30 @@ void Map::Impl::onTerrainCenterElevationChanged(double elevationMeters) {
     if (!centerClampedToGround) {
         return;
     }
+    // A running transition (an animated recenter, a fling) owns the camera: the jump below
+    // would cancel it, and across relief the height changes every frame, so the move stopped
+    // within a few kilometres of where it started. Let it finish; onUpdate applies the latest
+    // height once it has.
+    if (transform.inTransition()) {
+        centerAwaitingTerrainAnchor = true;
+        return;
+    }
+    if (clampCenterToTerrain(elevationMeters)) {
+        onUpdate();
+    }
+}
+
+bool Map::Impl::clampCenterToTerrain(double elevationMeters) {
     // Sub-metre differences are the terrain cover shifting under a camera that just moved,
     // not the ground actually changing height; acting on them would chase itself.
     constexpr double minimumChangeMeters = 0.5;
     if (std::abs(transform.getState().getCenterAltitude() - elevationMeters) < minimumChangeMeters) {
-        return;
+        return false;
     }
     // Raising the centre onto the terrain moves the orbit plane, not the centre's lng/lat,
     // so this settles rather than feeding back into the next frame's sample.
     transform.jumpTo(CameraOptions().withCenterAltitude(elevationMeters));
-    onUpdate();
+    return true;
 }
 
 void Map::Impl::jumpTo(const CameraOptions& camera) {
